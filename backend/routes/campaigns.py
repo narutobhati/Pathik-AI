@@ -4,8 +4,14 @@ from extensions import db, logger
 from models.campaign import Campaign
 from services.google_ads_service import get_google_ads_client
 from google.ads.googleads.errors import GoogleAdsException
+import os
+from google.ads.googleads.v22.enums.types.eu_political_advertising_status import (
+    EuPoliticalAdvertisingStatusEnum,
+)
+
 
 campaigns_bp = Blueprint("campaigns", __name__)
+
 
 @campaigns_bp.route("/", methods=["POST"])
 def create_campaign():
@@ -43,7 +49,6 @@ def create_campaign():
     if start_date >= end_date:
         return jsonify({"error": "End date must be after start date"}), 400
 
-    # -------- Create Campaign --------
     campaign = Campaign(
         name=data["name"],
         objective=data["objective"],
@@ -70,8 +75,6 @@ def create_campaign():
     }), 201
 
 
-
-
 @campaigns_bp.route("/", methods=["GET"])
 def get_campaigns():
     campaigns = Campaign.query.order_by(Campaign.created_at.desc()).all()
@@ -92,9 +95,7 @@ def get_campaigns():
         })
 
     logger.info(f"Fetched {len(result)} campaigns")
-
     return jsonify(result), 200
-
 
 
 @campaigns_bp.route("/<campaign_id>/publish", methods=["POST"])
@@ -113,23 +114,36 @@ def publish_campaign(campaign_id):
         client = get_google_ads_client()
         customer_id = os.getenv("GOOGLE_ADS_CUSTOMER_ID")
 
-        # -------- Create Budget --------
-        budget_service = client.get_service("CampaignBudgetService")
-        budget_operation = client.get_type("CampaignBudgetOperation")
+        # --------------------------------------------------
+        # Create or Reuse Campaign Budget (IDEMPOTENT)
+        # --------------------------------------------------
+        budget_resource = campaign.google_budget_resource
 
-        budget = budget_operation.create
-        budget.name = f"Budget for {campaign.name}"
-        budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
-        budget.amount_micros = campaign.daily_budget * 1_000_000
+        if not budget_resource:
+            budget_service = client.get_service("CampaignBudgetService")
+            budget_operation = client.get_type("CampaignBudgetOperation")
 
-        budget_response = budget_service.mutate_campaign_budgets(
-            customer_id=customer_id,
-            operations=[budget_operation]
-        )
+            budget = budget_operation.create
+            budget.name = f"Budget for {campaign.name} ({campaign.id})"
+            budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+            budget.amount_micros = int(campaign.daily_budget * 1_000_000)
 
-        budget_resource = budget_response.results[0].resource_name
+            budget_response = budget_service.mutate_campaign_budgets(
+                customer_id=customer_id,
+                operations=[budget_operation]
+            )
 
-        # -------- Create Campaign (PAUSED) --------
+            budget_resource = budget_response.results[0].resource_name
+            campaign.google_budget_resource = budget_resource
+            db.session.commit()
+
+            logger.info(f"Created budget {budget_resource}")
+        else:
+            logger.info(f"Reusing existing budget {budget_resource}")
+
+        # --------------------------------------------------
+        # Create Google Ads Campaign (PAUSED)
+        # --------------------------------------------------
         campaign_service = client.get_service("CampaignService")
         campaign_operation = client.get_type("CampaignOperation")
 
@@ -139,6 +153,19 @@ def publish_campaign(campaign_id):
         google_campaign.advertising_channel_type = (
             client.enums.AdvertisingChannelTypeEnum.SEARCH
         )
+
+        # REQUIRED: Bidding strategy
+        google_campaign.manual_cpc.enhanced_cpc_enabled = False
+
+        # REQUIRED: EU political advertising declaration (v22+)
+        google_campaign._pb.contains_eu_political_advertising = (
+            EuPoliticalAdvertisingStatusEnum.EuPoliticalAdvertisingStatus.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+        )
+
+
+
+
+        # Attach budget
         google_campaign.campaign_budget = budget_resource
 
         response = campaign_service.mutate_campaigns(
@@ -148,7 +175,9 @@ def publish_campaign(campaign_id):
 
         google_campaign_id = response.results[0].resource_name.split("/")[-1]
 
-        # -------- Save to DB --------
+        # --------------------------------------------------
+        # Persist state
+        # --------------------------------------------------
         campaign.google_campaign_id = google_campaign_id
         campaign.status = "PUBLISHED"
         db.session.commit()
@@ -160,9 +189,11 @@ def publish_campaign(campaign_id):
             "google_campaign_id": google_campaign_id
         }), 200
 
-    except GoogleAdsException as ex:
-        logger.error("Google Ads API error", exc_info=True)
+    except GoogleAdsException:
+        logger.exception("Google Ads API error")
         return jsonify({"error": "Google Ads API error"}), 500
+
     except Exception:
         logger.exception("Unexpected error during campaign publish")
         return jsonify({"error": "Internal server error"}), 500
+

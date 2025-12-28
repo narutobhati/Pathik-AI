@@ -1,7 +1,7 @@
 from google.ads.googleads.client import GoogleAdsClient
-from google.ads.googleads.errors import GoogleAdsException
 from extensions import logger
 import os
+
 
 def get_google_ads_client():
     try:

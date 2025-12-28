@@ -15,7 +15,7 @@ class Campaign(db.Model):
     status = db.Column(db.String(50), nullable=False, default="DRAFT")
 
     google_campaign_id = db.Column(db.String(255), nullable=True)
-
+    google_budget_resource = db.Column(db.String, nullable=True)
     ad_group_name = db.Column(db.String(255), nullable=False)
     ad_headline = db.Column(db.String(255), nullable=False)
     ad_description = db.Column(db.Text, nullable=False)
