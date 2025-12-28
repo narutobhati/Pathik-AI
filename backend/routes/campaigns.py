@@ -114,9 +114,6 @@ def publish_campaign(campaign_id):
         client = get_google_ads_client()
         customer_id = os.getenv("GOOGLE_ADS_CUSTOMER_ID")
 
-        # --------------------------------------------------
-        # Create or Reuse Campaign Budget (IDEMPOTENT)
-        # --------------------------------------------------
         budget_resource = campaign.google_budget_resource
 
         if not budget_resource:
@@ -141,9 +138,7 @@ def publish_campaign(campaign_id):
         else:
             logger.info(f"Reusing existing budget {budget_resource}")
 
-        # --------------------------------------------------
-        # Create Google Ads Campaign (PAUSED)
-        # --------------------------------------------------
+ 
         campaign_service = client.get_service("CampaignService")
         campaign_operation = client.get_type("CampaignOperation")
 
@@ -154,10 +149,8 @@ def publish_campaign(campaign_id):
             client.enums.AdvertisingChannelTypeEnum.SEARCH
         )
 
-        # REQUIRED: Bidding strategy
         google_campaign.manual_cpc.enhanced_cpc_enabled = False
 
-        # REQUIRED: EU political advertising declaration (v22+)
         google_campaign._pb.contains_eu_political_advertising = (
             EuPoliticalAdvertisingStatusEnum.EuPoliticalAdvertisingStatus.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
         )
@@ -165,7 +158,6 @@ def publish_campaign(campaign_id):
 
 
 
-        # Attach budget
         google_campaign.campaign_budget = budget_resource
 
         response = campaign_service.mutate_campaigns(
@@ -175,9 +167,6 @@ def publish_campaign(campaign_id):
 
         google_campaign_id = response.results[0].resource_name.split("/")[-1]
 
-        # --------------------------------------------------
-        # Persist state
-        # --------------------------------------------------
         campaign.google_campaign_id = google_campaign_id
         campaign.status = "PUBLISHED"
         db.session.commit()
